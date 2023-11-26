@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/sashabaranov/go-openai"
@@ -123,9 +124,12 @@ func main() {
 	isFirst := true
 	for ev := range sub.Events {
 		if isFirst {
-			fmt.Println("skipped")
+			fmt.Println("skipped: first reqest event")
 			isFirst = false
 			continue
+		}
+		if strings.Contains(ev.Content, "3行でまとめて") {
+			fmt.Println("skipped: do not contain command")
 		}
 		// handle returned event.
 		// channel will stay open until the ctx is cancelled (in this case, context timeout)
@@ -176,8 +180,6 @@ func main() {
 			}
 			fmt.Println("published success")
 		}
-
-		// cfg.summarize(ev.Content)
 	}
 
 }
