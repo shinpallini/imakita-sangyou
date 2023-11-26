@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"time"
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/sashabaranov/go-openai"
@@ -19,15 +18,17 @@ const (
 )
 
 type Config struct {
-	PrivateKey   string `json:"privatekey`
-	PublicKey    string `json:"publickey`
-	OpenAiApiKey string `json:"openai_apikey"`
+	PrivateKey   string   `json:"privatekey"`
+	PublicKey    string   `json:"publickey"`
+	OpenAiApiKey string   `json:"openai_apikey"`
+	RelaysUrl    []string `json:"relays_url"`
+	relays       map[string]*nostr.Relay
 	ctx          context.Context
 	client       *openai.Client
-	relay        *nostr.Relay
 }
 
 func NewConfig(ctx context.Context) (*Config, error) {
+	// load config
 	f, err := os.Open("config.json")
 	if err != nil {
 		return nil, err
@@ -40,11 +41,14 @@ func NewConfig(ctx context.Context) (*Config, error) {
 	}
 	cfg.ctx = ctx
 	cfg.client = openai.NewClient(cfg.OpenAiApiKey)
-	relay, err := nostr.RelayConnect(ctx, "wss://relay-jp.nostr.wirednet.jp")
-	if err != nil {
-		return nil, err
+	cfg.relays = make(map[string]*nostr.Relay)
+	for _, v := range cfg.RelaysUrl {
+		relay, err := nostr.RelayConnect(ctx, v)
+		if err != nil {
+			return nil, err
+		}
+		cfg.relays[v] = relay
 	}
-	cfg.relay = relay
 	return &cfg, nil
 
 }
@@ -59,16 +63,18 @@ func (c *Config) setProfile() error {
 	}
 	ev.Sign(c.PrivateKey)
 
-	_, err := c.relay.Publish(c.ctx, ev)
-	if err != nil {
-		fmt.Println(err)
-		return err
+	for url, relay := range c.relays {
+		_, err := relay.Publish(c.ctx, ev)
+		if err != nil {
+			fmt.Println(err)
+			return err
+		}
+		fmt.Println("profile update succeed: ", url)
 	}
-	fmt.Println("profile update succeed")
 	return nil
 }
 
-func (c *Config) summarize(content string) error {
+func (c *Config) summarize(content string) (string, error) {
 	resp, err := c.client.CreateChatCompletion(
 		context.Background(),
 		openai.ChatCompletionRequest{
@@ -86,53 +92,90 @@ func (c *Config) summarize(content string) error {
 		},
 	)
 	if err != nil {
-		return err
+		return "", err
 	}
 	fmt.Printf("%+v\n", resp)
-	return nil
+	return resp.Choices[0].Message.Content, nil
 }
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
+	// ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	// defer cancel()
 	// load config
 	cfg, err := NewConfig(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("%+v\n", cfg)
+	// fmt.Printf("%+v\n", cfg)
 	cfg.setProfile()
 
 	filters := []nostr.Filter{{
-		Kinds: []int{nostr.KindTextNote, nostr.KindArticle},
+		Kinds: []int{nostr.KindTextNote},
 		Tags:  nostr.TagMap{"p": []string{cfg.PublicKey}},
 		Limit: 1,
 	}}
-	sub, err := cfg.relay.Subscribe(ctx, filters)
+	sub, err := cfg.relays["wss://relay-jp.nostr.wirednet.jp"].Subscribe(ctx, filters)
 	if err != nil {
 		log.Fatal(err)
 	}
-
+	isFirst := true
 	for ev := range sub.Events {
+		if isFirst {
+			fmt.Println("skipped")
+			isFirst = false
+			continue
+		}
 		// handle returned event.
 		// channel will stay open until the ctx is cancelled (in this case, context timeout)
-		eventId := ev.Tags.GetLast([]string{"e"})
+		fmt.Printf("%+v\n", ev)
+		userPubKey := ev.PubKey
+		userEventId := ev.ID
+		eventId := ev.Tags.GetFirst([]string{"e"}).Value()
+		if eventId == "" {
+			fmt.Println("event not found")
+			continue
+		}
+		fmt.Println("eventId: ", eventId)
 		filters := []nostr.Filter{{
 			Kinds: []int{nostr.KindTextNote, nostr.KindArticle},
-			IDs:   []string{"e", eventId.Value()},
+			IDs:   []string{eventId},
 			Limit: 1,
 		}}
-		sub, err := cfg.relay.Subscribe(ctx, filters)
+		sub, err := cfg.relays["wss://relay-jp.nostr.wirednet.jp"].Subscribe(ctx, filters)
 		if err != nil {
-			log.Fatal(err)
+			fmt.Println(err)
 		}
-		for evv := range sub.Events {
-			fmt.Printf("%+v", evv)
-		}
+		// dispose of first subscribing content
+		for ev := range sub.Events {
+			fmt.Printf("%+v", ev.Content)
+			if len(ev.Content) < 30 {
+				fmt.Println("content is small")
+				continue
+			}
+			summary, err := cfg.summarize(ev.Content)
+			if err != nil {
+				fmt.Println(err)
+			}
+			t := nostr.Tags{nostr.Tag{"e", ev.ID}, nostr.Tag{"e", userEventId}, nostr.Tag{"p", userPubKey}}
+			// reply message
+			postEv := nostr.Event{
+				PubKey:    userPubKey,
+				CreatedAt: nostr.Now(),
+				Kind:      nostr.KindTextNote,
+				Tags:      t,
+				Content:   summary,
+			}
 
-		fmt.Printf("%+v", ev)
+			// calling Sign sets the event ID field and the event Sig field
+			postEv.Sign(cfg.PrivateKey)
+			_, err = cfg.relays["wss://relay-jp.nostr.wirednet.jp"].Publish(ctx, postEv)
+			if err != nil {
+				fmt.Println(err)
+			}
+			fmt.Println("published success")
+		}
 
 		// cfg.summarize(ev.Content)
 	}
