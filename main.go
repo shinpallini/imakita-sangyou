@@ -71,7 +71,7 @@ func (c *Config) setProfile() error {
 		CreatedAt: nostr.Now(),
 		Kind:      nostr.KindProfileMetadata,
 		Tags:      nil,
-		Content:   `{"name": "sangyou-bot", "about": "要約してほしい投稿に「3行で要約して」とこのbotにリプライを送ると、3行に要約します", "picture": ""}`,
+		Content:   `{"name": "sangyou-bot", "about": "今北産業！「3行でまとめて」とこのbotにリプライを送ると要約してくれます。", "picture": "https://robohash.org/npub1k2h9vmly9qdquvf75pvzyez3ysc5ctuj94yc5sc0vwkme297mvfsjxdl08?set=set4"}`,
 	}
 	ev.Sign(c.PrivateKey)
 
