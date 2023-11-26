@@ -22,27 +22,50 @@ type Config struct {
 	PrivateKey   string `json:"privatekey`
 	PublicKey    string `json:"publickey`
 	OpenAiApiKey string `json:"openai_apikey"`
+	ctx          context.Context
 	client       *openai.Client
+	relay        *nostr.Relay
 }
 
-func NewConfig() *Config {
+func NewConfig(ctx context.Context) (*Config, error) {
 	f, err := os.Open("config.json")
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
 	defer f.Close()
 	var cfg Config
 	err = json.NewDecoder(f).Decode(&cfg)
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
+	cfg.ctx = ctx
 	cfg.client = openai.NewClient(cfg.OpenAiApiKey)
-	return &cfg
+	relay, err := nostr.RelayConnect(ctx, "wss://relay-jp.nostr.wirednet.jp")
+	if err != nil {
+		return nil, err
+	}
+	cfg.relay = relay
+	return &cfg, nil
 
 }
 
-func (c *Config) setProfile() {
+func (c *Config) setProfile() error {
+	ev := nostr.Event{
+		PubKey:    c.PublicKey,
+		CreatedAt: nostr.Now(),
+		Kind:      nostr.KindProfileMetadata,
+		Tags:      nil,
+		Content:   `{"name": "sangyou-bot", "about": "要約してほしい投稿に「3行で要約して」とこのbotにリプライを送ると、3行に要約します", "picture": ""}`,
+	}
+	ev.Sign(c.PrivateKey)
 
+	_, err := c.relay.Publish(c.ctx, ev)
+	if err != nil {
+		fmt.Println(err)
+		return err
+	}
+	fmt.Println("profile update succeed")
+	return nil
 }
 
 func (c *Config) summarize(content string) error {
@@ -70,26 +93,24 @@ func (c *Config) summarize(content string) error {
 }
 
 func main() {
-	// load config
-	cfg := NewConfig()
-	fmt.Printf("%+v\n", cfg)
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	relay, err := nostr.RelayConnect(ctx, "wss://relay-jp.nostr.wirednet.jp")
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	// load config
+	cfg, err := NewConfig(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
+	fmt.Printf("%+v\n", cfg)
+	cfg.setProfile()
 
-	var filters nostr.Filters
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	filters = []nostr.Filter{{
+	filters := []nostr.Filter{{
 		Kinds: []int{nostr.KindTextNote, nostr.KindArticle},
 		Tags:  nostr.TagMap{"p": []string{cfg.PublicKey}},
 		Limit: 1,
 	}}
-	sub, err := relay.Subscribe(ctx, filters)
+	sub, err := cfg.relay.Subscribe(ctx, filters)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -103,7 +124,7 @@ func main() {
 			IDs:   []string{"e", eventId.Value()},
 			Limit: 1,
 		}}
-		sub, err := relay.Subscribe(ctx, filters)
+		sub, err := cfg.relay.Subscribe(ctx, filters)
 		if err != nil {
 			log.Fatal(err)
 		}
